@@ -5,7 +5,7 @@
 | Nama | NRP |
 |---|---|
 | **Nadia Iqlima** | **5027251108** |
-| **Salman Rifki Haq** | **5027251097** |
+| **Muhammad Salman Rifki Haq** | **5027251097** |
 
 Repository ini merupakan dokumentasi pengerjaan **Praktikum Jaringan Komputer Modul 3 Tahun 2026, Kelompok K-58**, khususnya **Soal 1–10**. Praktikum dilaksanakan pada lingkungan **GNS3**, menggunakan node berbasis **DebiNet** untuk router dan DHCP server serta **AlpiNet** pada sejumlah client. Fokus pekerjaan adalah konfigurasi pengalamatan IP, *routing*, DHCP server, DHCP relay, klasifikasi pool, *lease time*, reservasi IP, verifikasi konfigurasi, *packet capture*, simulasi gangguan, dan *autostart* setelah restart.
 
@@ -993,6 +993,303 @@ Pengerjaan Praktikum Jaringan Komputer Modul 3 Soal 1–10 berhasil membangun me
 Pembagian dua DHCP pool pada Network 2, short dan long lease pada Network 3, serta IP reservation Kugisaki berhasil diuji. Pemeriksaan client menunjukkan gateway, subnet, broadcast, dan DNS yang sesuai dengan konfigurasi yang diterapkan. Capture DHCP membuktikan proses DORA lengkap serta nilai `giaddr` yang sesuai interface relay. Uji gangguan menunjukkan client gagal meminta lease baru saat relay mati, kemudian kembali berhasil setelah layanan dipulihkan.
 
 Pada tahap akhir, pengaturan autostart berhasil diterapkan pada Tengen dan Jichi. Setelah kedua node dihentikan dan dinyalakan ulang, DHCP Server serta DHCP Relay otomatis aktif dan client tetap dapat memperoleh IP dari kebijakan yang sesuai. Pengujian ping juga mengonfirmasi komunikasi menuju gateway dan server DHCP Data Center berjalan. Dengan demikian, tujuan Soal 1–10 telah dipenuhi berdasarkan pengujian yang terdokumentasi.
+
+---
+
+## Penyelesaian Tugas (Nomor 11 - 20)
+
+### 11. Konfigurasi DNS Master (Utahime)
+Node Utahime bertindak sebagai pusat resolusi domain `jujutsu.k58.com`.
+**Script (`soal11_master.sh`):**
+```bash
+#!/bin/bash
+# Set IP dan DNS Sementara
+ip addr flush dev eth0
+ip addr add 192.240.1.10/24 dev eth0
+ip link set eth0 up
+ip route add default via 192.240.1.1
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+# Instalasi BIND9
+apt-get update
+apt-get install -y bind9 bind9utils bind9-doc dnsutils
+
+# Konfigurasi Options
+cat > /etc/bind/named.conf.options << 'OPT'
+options {
+        directory "/var/cache/bind";
+        forwarders { 192.168.122.1; };
+        allow-query { any; };
+        auth-nxdomain no;
+        listen-on-v6 { any; };
+};
+OPT
+
+# Konfigurasi Zone Master
+cat > /etc/bind/named.conf.local << 'LOC'
+zone "jujutsu.k58.com" {
+        type master;
+        file "/etc/bind/db.jujutsu.k58.com";
+        allow-transfer { 192.240.1.11; };
+        notify yes;
+};
+LOC
+
+# File Zone Database
+cat > /etc/bind/db.jujutsu.k58.com << 'ZONE'
+$TTL    604800
+@       IN      SOA     utahime.jujutsu.k58.com. root.jujutsu.k58.com. (
+                              2026101501 ; Serial
+                              604800     ; Refresh
+                              86400      ; Retry
+                              2419200    ; Expire
+                              604800 )   ; Negative Cache TTL
+;
+@       IN      NS      utahime.jujutsu.k58.com.
+@       IN      NS      shoko.jujutsu.k58.com.
+@       IN      A       192.240.1.12
+utahime IN      A       192.240.1.10
+shoko   IN      A       192.240.1.11
+gojo    IN      A       192.240.1.12
+ZONE
+
+# Menyalakan Service
+named
+echo "nameserver 192.240.1.10" > /etc/resolv.conf
+```
+* **Cara Pengujian:** Jalankan `ps aux | grep named` untuk memastikan service berjalan.
+
+---
+
+### 12. Konfigurasi DNS Slave (Shoko)
+Shoko berfungsi sebagai DNS cadangan yang menarik file *zone* secara otomatis dari Utahime.
+**Script (`soal12_slave.sh`):**
+```bash
+#!/bin/bash
+ip addr flush dev eth0
+ip addr add 192.240.1.11/24 dev eth0
+ip link set eth0 up
+ip route add default via 192.240.1.1
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+apt-get update
+apt-get install -y bind9 bind9utils bind9-doc dnsutils
+
+cat > /etc/bind/named.conf.options << 'OPT'
+options {
+         directory "/var/cache/bind";
+         forwarders { 192.168.122.1; };
+         allow-query { any; };
+         auth-nxdomain no;
+         listen-on-v6 { any; };
+};
+OPT
+
+cat > /etc/bind/named.conf.local << 'LOC'
+zone "jujutsu.k58.com" {
+         type slave;
+         file "/var/cache/bind/db.jujutsu.k58.com";
+         masters { 192.240.1.10; };
+};
+LOC
+
+pkill named 2>/dev/null
+named
+echo "nameserver 192.240.1.10" > /etc/resolv.conf
+```
+* **Cara Pengujian:** Cek file yang ditarik menggunakan `ls -l /var/cache/bind/db.jujutsu.k58.com`.
+
+---
+
+### 13. Replikasi Database MariaDB (Yaga & Inumaki)
+Yaga di-set sebagai *Master* dan Inumaki sebagai *Slave* untuk sinkronisasi data SQL.
+**Script Yaga (Master):**
+```bash
+#!/bin/bash
+ip addr add 192.240.4.20/24 dev eth0; ip link set eth0 up; ip route add default via 192.240.4.1
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+apt-get update; apt-get install -y mariadb-server
+sed -i 's/bind-address.*/bind-address = 0.0.0.0/' /etc/mysql/mariadb.conf.d/50-server.cnf
+sed -i '/\[mysqld\]/a server-id = 1\nlog_bin = /var/log/mysql/mysql-bin.log' /etc/mysql/mariadb.conf.d/50-server.cnf
+
+mkdir -p /var/log/mysql; chown -R mysql:mysql /var/log/mysql
+service mariadb start || service mysql start
+
+mysql -u root -e "CREATE USER 'replica'@'%' IDENTIFIED BY 'password';"
+mysql -u root -e "GRANT REPLICATION SLAVE ON *.* TO 'replica'@'%';"
+mysql -u root -e "FLUSH PRIVILEGES;"
+mysql -u root -e "SHOW MASTER STATUS;"
+```
+*(Catat nama file dan log position yang muncul untuk dimasukkan ke Inumaki).*
+
+**Script Inumaki (Slave):**
+```bash
+#!/bin/bash
+ip addr add 192.240.4.21/24 dev eth0; ip link set eth0 up; ip route add default via 192.240.4.1
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+apt-get update; apt-get install -y mariadb-server
+sed -i 's/bind-address.*/bind-address = 0.0.0.0/' /etc/mysql/mariadb.conf.d/50-server.cnf
+sed -i '/\[mysqld\]/a server-id = 2\nlog_bin = /var/log/mysql/mysql-bin.log' /etc/mysql/mariadb.conf.d/50-server.cnf
+
+mkdir -p /var/log/mysql; chown -R mysql:mysql /var/log/mysql
+service mariadb start || service mysql start
+
+# Ganti nilai log file dan log pos sesuai hasil dari Yaga
+mysql -u root -e "CHANGE MASTER TO MASTER_HOST='192.240.4.20', MASTER_USER='replica', MASTER_PASSWORD='password', MASTER_LOG_FILE='mysql-bin.000001', MASTER_LOG_POS=1528;"
+mysql -u root -e "START SLAVE;"
+mysql -u root -e "SHOW SLAVE STATUS\G"
+```
+* **Cara Pengujian:** Pastikan `Slave_IO_Running: Yes` dan `Slave_SQL_Running: Yes` muncul di Inumaki.
+
+---
+
+### 14, 15, & 18. Web Frontend, API, dan Target Load Balancing
+Pendelegasian *script* untuk mengaktifkan node-node pekerja di bagian belakang (seperti Nanami, Maki, dkk) dan menyiapkan algoritma perataan beban (*Load Balancing*).
+**Script (Dijalankan di masing-masing node pekerja backend):**
+```bash
+#!/bin/bash
+ip addr flush dev eth0
+# Ganti dengan IP Node masing-masing
+ip addr add 192.240.x.x/24 dev eth0 
+ip link set eth0 up
+ip route add default via 192.240.x.1
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+apt-get update
+apt-get install -y nginx php-fpm php-common
+
+PHP_SVC=$(ls /etc/init.d/ | grep fpm | head -n 1)
+service $PHP_SVC start
+
+cat > /etc/nginx/sites-available/default << NGINX
+server {
+    listen 80 default_server;
+    root /var/www/html;
+    index index.php index.html index.htm;
+    server_name _;
+    location / {
+        try_files \$uri \$uri/ =404;
+    }
+    location ~ \.php\$ {
+        include snippets/fastcgi-php.conf;
+        fastcgi_pass unix:/run/php/$PHP_SVC.sock;
+    }
+}
+NGINX
+
+echo "<?php echo '<h1>Selamat Datang di Node: ' . gethostname() . '</h1>'; ?>" > /var/www/html/index.php
+service nginx restart
+service $PHP_SVC restart
+```
+* **Cara Pengujian:** Jalankan `curl http://localhost` pada setiap node untuk memastikan output HTML muncul.
+
+---
+
+### 16, 17, & 19. Reverse Proxy, Caching, dan Rate Limiting (Gojo)
+Konfigurasi Nginx di gerbang utama (Gojo) yang bertindak sebagai Reverse Proxy, menyimpan hasil *Cache* statis, dan membatasi (*Rate Limit*) kecepatan *request* pengunjung agar tidak terjadi DDoS. Bagian Load Balancing (dari Soal 18) juga diintegrasikan ke *upstream* Nginx ini.
+
+**Script Gojo (`soal16_17_19_gojo.sh`):**
+```bash
+#!/bin/bash
+ip addr flush dev eth0
+ip addr add 192.240.1.12/24 dev eth0
+ip link set eth0 up
+ip route add default via 192.240.1.1
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+
+apt-get update
+apt-get install -y nginx
+
+cat > /etc/nginx/nginx.conf << 'NGINX_CONF'
+user www-data;
+worker_processes auto;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events { worker_connections 768; }
+
+http {
+    sendfile on;
+    tcp_nopush on;
+    types_hash_max_size 2048;
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    # No. 17 Caching
+    proxy_cache_path /var/cache/nginx levels=1:2 keys_zone=jujutsu_cache:10m max_size=1g inactive=60m use_temp_path=off;
+    
+    # No. 19 Rate Limiting
+    limit_req_zone $binary_remote_addr zone=jujutsu_limit:10m rate=50r/s;
+
+    # No. 18 Load Balancing Pools (Terhubung dengan Soal 14 & 15)
+    upstream frontend_pool {
+        server 192.240.x.a; 
+        server 192.240.x.b;
+    }
+    upstream api_pool {
+        server 192.240.4.27; 
+    }
+
+    server {
+        listen 80;
+        server_name jujutsu.k58.com;
+
+        # No. 16 Reverse Proxy ke Frontend
+        location / {
+            proxy_pass http://frontend_pool;
+            proxy_cache jujutsu_cache;
+            proxy_cache_valid 200 302 10m;
+            proxy_cache_valid 404 1m;
+            add_header X-Proxy-Cache $upstream_cache_status;
+        }
+
+        # Reverse Proxy ke API dengan Rate Limit
+        location /api {
+            proxy_pass http://api_pool;
+            limit_req zone=jujutsu_limit burst=20 nodelay;
+        }
+    }
+}
+NGINX_CONF
+
+mkdir -p /var/cache/nginx
+service nginx restart
+```
+* **Cara Pengujian:** Jalankan `nginx -t` untuk memeriksa tidak ada *syntax error*.
+
+---
+
+### 20. Load Testing via Client (Kusakabe)
+Kusakabe menggunakan Alpine Linux dan melakukan pengujian berat (Load Test) ke domain `jujutsu.k58.com` menggunakan alat bantu `ab` (Apache Benchmark).
+**Script Kusakabe (`soal20_kusakabe.sh`):**
+```sh
+#!/bin/sh
+# 1. Mendapatkan IP secara dinamis dari DHCP
+udhcpc -i eth0
+
+# 2. Instalasi Tool (Arahkan DNS sementara ke internet)
+echo "nameserver 8.8.8.8" > /etc/resolv.conf
+apk update
+apk add apache2-utils
+
+# 3. Kembalikan DNS ke Master (Utahime)
+echo "nameserver 192.240.1.10" > /etc/resolv.conf
+
+# 4. Pengujian Web dan Cache
+echo "=== HASIL CACHE ==="
+curl -I http://jujutsu.k58.com/
+
+# 5. Stress Testing (Frontend)
+echo "=== STRESS TEST FRONTEND ==="
+ab -n 600 -c 30 http://jujutsu.k58.com/
+
+# 6. Stress Testing (API & Rate Limit)
+echo "=== STRESS TEST API ==="
+ab -n 600 -c 30 http://jujutsu.k58.com/api
+```
+* **Cara Pengujian:** Eksekusi dengan `sh soal20_kusakabe.sh`. Pembuktian Load Test berhasil ditandai dengan munculnya parameter `Requests per second` dan tidak adanya server *crash*. Kegagalan sebagian koneksi (Failed requests) merupakan bukti berjalannya sistem **Rate Limit** dengan baik.
 
 ---
 
